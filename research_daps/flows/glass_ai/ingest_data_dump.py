@@ -3,7 +3,6 @@ import logging
 import datetime
 import pandas as pd
 
-import boto3
 from process_raw import (
     glass_df_loader,
     process_address,
@@ -16,9 +15,9 @@ from metaflow import FlowSpec, Parameter, step, JSONType
 
 req_keys = ["organisation", "address", "sector"]
 
-class GlassMainDumpFlow(FlowSpec):
-    """ Clean and process raw Glass AI data into dataframes """
 
+class GlassMainDumpFlow(FlowSpec):
+    """Clean and process raw Glass AI data into dataframes"""
 
     table_names = [
             "address",
@@ -61,7 +60,7 @@ class GlassMainDumpFlow(FlowSpec):
         if self.test_mode:
             nrows = 10_000
             logging.warning(
-                f"TEST MODE: Constraining to first {nrows} orgs or {nrows} rows..."
+                f"TEST MODE: Constraining to first {nrows} orgs or {nrows} rows."
             )
             test_ids = glass_df_loader(  # First `nrows` organisation ids
                 self.s3_inputs["organisation"], nrows=nrows
@@ -73,7 +72,8 @@ class GlassMainDumpFlow(FlowSpec):
                     return df
                 return df.loc[lambda x: x.id_organisation.isin(test_ids)]
         else:
-            test_filter = lambda x: x
+            def test_filter(x: pd.DataFrame) -> pd.DataFrame:
+                return x
 
         self.organisation = glass_df_loader(self.s3_inputs["organisation"]).pipe(test_filter)
         self.address = glass_df_loader(self.s3_inputs["address"]).pipe(test_filter)
