@@ -13,15 +13,41 @@ from research_daps import declarative_base
 
 Base = declarative_base()
 
-organisation_address = Table(
-    "organisation_address",
-    Base.metadata,
-    Column("org_id", Integer, ForeignKey("organisation.org_id")),
-    Column("address_id", Integer, ForeignKey("address.address_id")),
-    # TODO: Active? boolean column indicating whether address is in latest data dump
-    # TODO: Rank Integer column indicating address rank
-    # TODO: Date Date column indicating date of latest dump with this relationship
-)
+# organisation_address = Table(
+#     "organisation_address",
+#     Base.metadata,
+#     Column("org_id", Integer, ForeignKey("organisation.org_id")),
+#     Column("address_id", Integer, ForeignKey("address.address_id")),
+#     # TODO: Active? boolean column indicating whether address is in latest data dump
+#     # TODO: Rank Integer column indicating address rank
+#     # TODO: Date Date column indicating date of latest dump with this relationship
+# )
+class OrganisationAddress(Base):
+    """Association object between organisations and addresses"""
+
+    org_id = Column(Integer, ForeignKey("organisation.org_id"), primary_key=True)
+    address_id = Column(Integer, ForeignKey("address.address_id"), primary_key=True)
+    # TODO: do we really want to keep ranks? If ranks constantly change then
+    # this proliferates a lot of data
+    rank = Column(
+        Integer, nullable=False, index=True, doc="Rank of `address_id` for `org_id`"
+    )
+    is_active = Column(
+        Boolean,
+        nullable=False,
+        index=True,
+        doc="Indicates whether `address_id` is active",
+    )
+    # TODO : should this really have two date columns: valid_from and valid_to ?
+    date = Column(
+        Date,
+        nullable=False,
+        index=True,
+        doc="Date of data-dump associating org with address",
+    )
+    organisation = relationship("Organisation", back_populates="addresses")
+    address = relationship("Address", back_populates="organisations")
+
 
 organisation_sector = Table(
     "organisation_sector",
@@ -67,9 +93,10 @@ class Organisation(Base):
     sectors = relationship(
         "Sector", secondary=organisation_sector, back_populates="organisations"
     )
-    addresses = relationship(
-        "Address", secondary=organisation_address, back_populates="organisations"
-    )
+    addresses = relationship("OrganisationAddress", back_populates="organisation")
+    # addresses = relationship(
+    #     "Address", secondary=organisation_address, back_populates="organisations"
+    # )
 
 
 class OrganisationMetadata(Base):
@@ -113,9 +140,10 @@ class Address(Base):
     address_id = Column(Integer, primary_key=True)
     address_text = Column(String, nullable=False, unique=True, doc="Full address text")
     postcode = Column(String, doc="Postcode of address")
-    organisations = relationship(
-        "Organisation", secondary=organisation_address, back_populates="addresses"
-    )
+    organisations = relationship("OrganisationAddress", back_populates="address")
+    # organisations = relationship(
+    #     "Organisation", secondary=organisation_address, back_populates="addresses"
+    # )
 
 
 class Notice(Base):
@@ -128,7 +156,7 @@ class Notice(Base):
     )
     url = Column(String, nullable=False, doc="URL snippet was extracted from")
     date = Column(
-        Date, nullable=False, doc="Date of data-dump inserting row", index=True
+        Date, nullable=False, index=True, doc="Date of data-dump inserting row"
     )
     terms = relationship("CovidTerm", secondary=notice_terms, back_populates="notices")
 
@@ -139,9 +167,11 @@ class CovidTerm(Base):
     """
 
     term_id = Column(Integer, primary_key=True)
-    term_string = Column(String, unique=True, index=True)
+    term_string = Column(String, nullable=False, unique=True, index=True)
     date_introduced = Column(
-        Date, doc="Date of data-dump term was first used to find notices"
+        Date,
+        nullable=False,
+        doc="Date of data-dump term was first used to find notices",
     )
     notices = relationship("Notice", secondary=notice_terms, back_populates="terms")
 
@@ -150,7 +180,9 @@ class Sector(Base):
     """Sector names: LinkedIn taxonomy"""
 
     sector_id = Column(Integer, primary_key=True)
-    sector_name = Column(String, unique=True, doc="Name of sector")
+    sector_name = Column(
+        String, nullable=False, index=True, unique=True, doc="Name of sector"
+    )
     organisations = relationship(
         "Organisation", secondary=organisation_sector, back_populates="sectors"
     )
@@ -165,4 +197,6 @@ class OrganisationCompaniesHouseMatch(Base):
     org_id = Column(
         "org_id", Integer, ForeignKey("organisation.org_id"), primary_key=True
     )
-    company_match_type = Column(String, doc="Type of match: MATCH_3,MATCH_4,MATCH_5")
+    company_match_type = Column(
+        String, nullable=False, doc="Type of match: MATCH_3,MATCH_4,MATCH_5"
+    )
