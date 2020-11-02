@@ -15,7 +15,7 @@ then
     S3_MOUNT=/media/s3fs
     mkdir -p $S3_MOUNT
     chown $USER $S3_MOUNT || true
-    s3fs nesta-glass $S3_MOUNT -o passwd_file=.passwd-s3fs -o use_cache=/tmp || true
+    s3fs nesta-glass $S3_MOUNT -o passwd_file=$HOME/.passwd-s3fs -o use_cache=/tmp || true
 
     s3_input='{"organisation": "'$S3_MOUNT'/data/raw/glass_ai_uk_2020JUN/organization.2020JUN.txt", "address": "'$S3_MOUNT'/data/raw/glass_ai_uk_2020JUN/address.2020JUN.txt", "sector": "'$S3_MOUNT'/data/raw/glass_ai_uk_2020JUN/sectors.2020JUN.txt"}'
     datastore=local
