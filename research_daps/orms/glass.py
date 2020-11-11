@@ -2,82 +2,102 @@
 """Glass AI ORMs
 
 Assumptions:
-- Organisation names and URL's do not change
-- Sectors do change [TODO]
-- Addresses do change [TODO]
+- organisation.name does not change
+- organisation.website does not change
+- Sector ORM does not change
+
+Longitudinally updating ORM's (via. append) tracking time:
+- OrganisationAddress
+- OrganisationSector
+- OrganisationDescription
+- OrganisationCompaniesHouseMatch
+- OrganisationMetadata
+- CovidTerm
+- Notice
+
+Updates:
+- Organisation.active
 
 """
-from sqlalchemy import Table, Column, Integer, String, ForeignKey, Date, Boolean
+from sqlalchemy import Table, Column, Integer, TEXT, ForeignKey, Date, Boolean, VARCHAR, CHAR
 from sqlalchemy.orm import relationship, backref
 from research_daps import declarative_base
 
-Base = declarative_base()
+Base = declarative_base(prefix="glass_")
 
-# organisation_address = Table(
-#     "organisation_address",
-#     Base.metadata,
-#     Column("org_id", Integer, ForeignKey("organisation.org_id")),
-#     Column("address_id", Integer, ForeignKey("address.address_id")),
-#     # TODO: Active? boolean column indicating whether address is in latest data dump
-#     # TODO: Rank Integer column indicating address rank
-#     # TODO: Date Date column indicating date of latest dump with this relationship
-# )
 class OrganisationAddress(Base):
     """Association object between organisations and addresses"""
 
-    org_id = Column(Integer, ForeignKey("organisation.org_id"), primary_key=True)
-    address_id = Column(Integer, ForeignKey("address.address_id"), primary_key=True)
-    # TODO: do we really want to keep ranks? If ranks constantly change then
-    # this proliferates a lot of data
-    rank = Column(
-        Integer, nullable=False, index=True, doc="Rank of `address_id` for `org_id`"
+    org_id = Column(
+        Integer,
+        ForeignKey("glass_organisation.org_id"),
+        primary_key=True,
     )
-    is_active = Column(
-        Boolean,
-        nullable=False,
-        index=True,
-        doc="Indicates whether `address_id` is active",
+    address_id = Column(
+        Integer,
+        ForeignKey("glass_address.address_id"),
+        primary_key=True,
     )
-    # TODO : should this really have two date columns: valid_from and valid_to ?
     date = Column(
         Date,
         nullable=False,
         index=True,
+        primary_key=True,
         doc="Date of data-dump associating org with address",
+    )
+    rank = Column(
+        Integer, nullable=False, index=True, doc="Rank of `address_id` for `org_id`"
     )
     organisation = relationship("Organisation", back_populates="addresses")
     address = relationship("Address", back_populates="organisations")
 
 
-organisation_sector = Table(
-    "organisation_sector",
-    Base.metadata,
-    Column("org_id", Integer, ForeignKey("organisation.org_id")),
-    Column("sector_id", Integer, ForeignKey("sector.sector_id")),
-    # TODO: Active? boolean column indicating whether sector is in latest data dump
-    # TODO: Rank Integer column indicating sector rank
-    # TODO: Date Date column indicating date of latest dump with this relationship
-)
+class OrganisationSector(Base):
+    """Association object between organisations and sectors"""
+
+    org_id = Column(
+        Integer,
+        ForeignKey("glass_organisation.org_id"),
+        primary_key=True,
+    )
+    sector_id = Column(
+        Integer,
+        ForeignKey("glass_sector.sector_id"),
+        primary_key=True,
+    )
+    date = Column(
+        Date,
+        nullable=False,
+        index=True,
+        primary_key=True,
+        doc="Date of data-dump associating org with sector",
+    )
+    rank = Column(
+        Integer, nullable=False, index=True, doc="Rank of `sector_id` for `org_id`"
+    )
+    organisation = relationship("Organisation", back_populates="sectors")
+    sector = relationship("Sector", back_populates="organisations")
+
 
 notice_terms = Table(
-    "notice_terms",
+    "glass_notice_terms",
     Base.metadata,
-    Column("notice_id", Integer, ForeignKey("notice.notice_id")),
-    Column("term_id", Integer, ForeignKey("covid_term.term_id")),
+    Column("notice_id", Integer, ForeignKey("glass_notice.notice_id")),
+    Column("term_id", Integer, ForeignKey("glass_covid_term.term_id")),
 )
 
 
 class Organisation(Base):
     """An organisation relating to a business website"""
 
-    org_id = Column(Integer, primary_key=True)
+    org_id = Column(Integer, primary_key=True, autoincrement=False)
     name = Column(
-        String,
+        VARCHAR(200),  # AB 10/11/20: 167 is longest name
         unique=True,
         doc="Organisation name inferred by named entity recognition",
         index=True,
     )
-    website = Column(String, nullable=False, doc="URL of organisation")
+    website = Column(TEXT, nullable=False, doc="URL of organisation")
     active = Column(
         Boolean,
         nullable=False,
@@ -90,26 +110,29 @@ class Organisation(Base):
     )
     metadata_ = relationship("OrganisationMetadata", backref=backref("organisation"))
     # Many-to-many
-    sectors = relationship(
-        "Sector", secondary=organisation_sector, back_populates="organisations"
-    )
     addresses = relationship("OrganisationAddress", back_populates="organisation")
-    # addresses = relationship(
-    #     "Address", secondary=organisation_address, back_populates="organisations"
-    # )
+    sectors = relationship("OrganisationSector", back_populates="organisation")
+    company_match_by_glass = relationship(
+        "OrganisationCompaniesHouseMatch", back_populates="organisation"
+    )
 
 
 class OrganisationMetadata(Base):
     """Organisation metadata which may not be stable over time"""
 
-    org_id = Column(Integer, ForeignKey("organisation.org_id"), primary_key=True)
+    org_id = Column(
+        Integer,
+        ForeignKey("glass_organisation.org_id"),
+        primary_key=True,
+        autoincrement=False,
+    )
     date = Column(
         Date, primary_key=True, doc="Date of data-dump inserting row", index=True
     )
     has_webshop = Column(
         Boolean, nullable=False, doc="If True, presence of a webshop was found"
     )
-    vat_number = Column(String, doc="VAT number (low population)")
+    vat_number = Column(CHAR(9), doc="VAT number (high null count)")
     low_quality = Column(
         Boolean,
         nullable=False,
@@ -120,10 +143,11 @@ class OrganisationMetadata(Base):
 class OrganisationDescription(Base):
     """Descriptions of organisation activities"""
 
-    # description_id = Column(Integer, primary_key=True)
-    org_id = Column(Integer, ForeignKey("organisation.org_id"), primary_key=True)
-    description = Column(
-        String, nullable=False, doc="Description of organisation extracted from website"
+    org_id = Column(
+        Integer,
+        ForeignKey("glass_organisation.org_id"),
+        primary_key=True,
+        autoincrement=False,
     )
     date = Column(
         Date,
@@ -132,32 +156,32 @@ class OrganisationDescription(Base):
         index=True,
         doc="Date of data-dump inserting row",
     )
+    description = Column(
+        TEXT, nullable=False, doc="Description of organisation extracted from website"
+    )
 
 
 class Address(Base):
     """List of addresses found in websites"""
 
-    address_id = Column(Integer, primary_key=True)
-    address_text = Column(String, nullable=False, unique=True, doc="Full address text")
-    postcode = Column(String, doc="Postcode of address")
+    address_id = Column(Integer, primary_key=True, autoincrement=True)
+    address_text = Column(VARCHAR(300), nullable=False, doc="Full address text", unique=True)  # AB 10/11/20: 266 longest
+    postcode = Column(VARCHAR(8), index=True, doc="Postcode of address")
     organisations = relationship("OrganisationAddress", back_populates="address")
-    # organisations = relationship(
-    #     "Organisation", secondary=organisation_address, back_populates="addresses"
-    # )
 
 
 class Notice(Base):
     """Covid Notices extracted from websites"""
 
     notice_id = Column(Integer, primary_key=True)
-    org_id = Column("org_id", Integer, ForeignKey("organisation.org_id"))
-    snippet = Column(
-        String, nullable=False, doc="Extracted text snippet relating to COVID"
-    )
-    url = Column(String, nullable=False, doc="URL snippet was extracted from")
+    org_id = Column(Integer, ForeignKey("glass_organisation.org_id"))
     date = Column(
         Date, nullable=False, index=True, doc="Date of data-dump inserting row"
     )
+    snippet = Column(
+        TEXT, nullable=False, doc="Extracted text snippet relating to COVID"
+    )
+    url = Column(TEXT, nullable=False, doc="URL snippet was extracted from")
     terms = relationship("CovidTerm", secondary=notice_terms, back_populates="notices")
 
 
@@ -166,9 +190,9 @@ class CovidTerm(Base):
     Terms are used to find notices
     """
 
-    term_id = Column(Integer, primary_key=True)
-    term_string = Column(String, nullable=False, unique=True, index=True)
-    date_introduced = Column(
+    term_id = Column(Integer, primary_key=True, autoincrement=False)
+    term_string = Column(VARCHAR(100), nullable=False, unique=True, index=True)  # TODO length exploration
+    date = Column(
         Date,
         nullable=False,
         doc="Date of data-dump term was first used to find notices",
@@ -179,24 +203,24 @@ class CovidTerm(Base):
 class Sector(Base):
     """Sector names: LinkedIn taxonomy"""
 
-    sector_id = Column(Integer, primary_key=True)
+    sector_id = Column(Integer, primary_key=True, autoincrement=False)
     sector_name = Column(
-        String, nullable=False, index=True, unique=True, doc="Name of sector"
+        VARCHAR(43), nullable=False, index=True, unique=True, doc="Name of sector"
     )
-    organisations = relationship(
-        "Organisation", secondary=organisation_sector, back_populates="sectors"
-    )
+    organisations = relationship("OrganisationSector", back_populates="sector")
 
 
 class OrganisationCompaniesHouseMatch(Base):
-    """Organisation matches to companies house performed by Glass"""
+    """Organisation matches to companies house performed by Glass (Association object)"""
 
     company_id = Column(
-        String, doc="Companies House number", primary_key=True
-    )  # TODO: Add `ForeignKey("companies.company_id")` once companies house pipeline / ORM added
+        VARCHAR(8), doc="Companies House number", primary_key=True
+    )  # TODO: Add `ForeignKey("glass_companies.company_id")` once companies house pipeline / ORM added
     org_id = Column(
-        "org_id", Integer, ForeignKey("organisation.org_id"), primary_key=True
+        "org_id", Integer, ForeignKey("glass_organisation.org_id"), primary_key=True
     )
+    # TODO: date
     company_match_type = Column(
-        String, nullable=False, doc="Type of match: MATCH_3,MATCH_4,MATCH_5"
+        TEXT, nullable=False, doc="Type of match: MATCH_3,MATCH_4,MATCH_5"
     )
+    organisation = relationship("Organisation", back_populates="company_match_by_glass")

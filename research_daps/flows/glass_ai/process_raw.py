@@ -9,11 +9,10 @@ from toolz import merge
 
 import bulwark.decorators as dc
 import bulwark.checks as ck
-import re
 
 
-def postcode_extractor(x: str, all: bool=False) -> str:
-    """ Extract postcodes from a Series using regex (case insensitive)
+def postcode_extractor(x: pd.Series, all: bool = False) -> pd.Series:
+    """Extract postcodes from a Series using regex (case insensitive)
     Constructed from:
     https://stackoverflow.com/questions/164979/regex-for-matching-uk-postcodes/51885364#51885364
     Args:
@@ -31,7 +30,7 @@ def postcode_extractor(x: str, all: bool=False) -> str:
         extractor = x.str.extractall
     else:
         extractor = x.str.extract
-    return extractor(postcode_regex, flags=re.IGNORECASE)[["postcode"]]
+    return extractor(postcode_regex, flags=re.IGNORECASE)["postcode"]
 
 
 SHORT_DESCRIPTION_THRESHOLD = 50
@@ -88,12 +87,13 @@ def process_organisations(
                 "crn": "company_number",
                 "ch_match_type": "company_number_match_type",
             }
-        )
-        .assign(
+        ).assign(
             has_webshop=lambda x: x.has_webshop.map({"Y": True}),
         )
         # Fill missing values
-        .fillna({"has_webshop": False}, downcast="infer",
+        .fillna(
+            {"has_webshop": False},
+            downcast="infer",
         )
     )
     return df.assign(
@@ -103,6 +103,7 @@ def process_organisations(
         has_webshop=lambda x: x.has_webshop.astype(bool),
     ).reset_index()
 
+
 def check_organisations(
     df: pd.DataFrame,
     n_address: pd.Series,
@@ -110,7 +111,8 @@ def check_organisations(
 ) -> pd.DataFrame:
     """ Process organisation table """
 
-    df = (df.set_index("id_organisation")
+    df = (
+        df.set_index("id_organisation")
         # Add new columns from other tables
         .join(n_address)
         .join(n_sectors)
@@ -126,11 +128,12 @@ def check_organisations(
             },
             downcast="infer",
         )
-        .pipe(ck.within_range,
+        .pipe(
+            ck.within_range,
             {
                 "n_address": (0, 5),
                 "n_sectors": (0, 7),
-            }
+            },
         )
     )
 
@@ -155,7 +158,9 @@ def check_organisations(
     address_quality = df.n_address == 0
     sector_quality = df.n_sectors == 0
 
-    return (name_quality | description_quality | address_quality | sector_quality).rename("low_quality")
+    return (
+        name_quality | description_quality | address_quality | sector_quality
+    ).rename("low_quality")
 
 
 @dc.HasDtypes({"id_organisation": int})
@@ -164,7 +169,7 @@ def process_address(df: pd.DataFrame) -> pd.DataFrame:
     """ Process address table """
     postcodes = postcode_extractor(df.address_text)
     low_quality = postcodes.isnull()
-    return df.assign(postcode=map(str.upper, postcodes), low_quality=low_quality)
+    return df.assign(postcode=postcodes.str.upper(), low_quality=low_quality)
 
 
 @dc.HasDtypes({"id_organisation": int})

@@ -1,4 +1,13 @@
 """ Metaflow pipeline to process raw Glass AI data into dataframes """
+import subprocess
+import sys
+import os
+
+path = f"{os.path.dirname(os.path.realpath(__file__))}/requirements.txt"
+output = subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', path], capture_output=True)
+print(output.stdout)
+print(output.stderr)
+
 import logging
 import datetime
 import pandas as pd
@@ -11,20 +20,21 @@ from process_raw import (
     process_sectors,
 )
 from metaflow import FlowSpec, Parameter, step, JSONType
+from daps_utils import talk_to_luigi
 
 
 req_keys = ["organisation", "address", "sector"]
 
-
+@talk_to_luigi
 class GlassMainDumpFlow(FlowSpec):
     """Clean and process raw Glass AI data into dataframes"""
 
     table_names = [
-            "address",
-            "sectors",
-            "organisation",
-            "glass_company_match",
-        ]
+        "address",
+        "sectors",
+        "organisation",
+        "glass_company_match",
+    ]
 
     test_mode = Parameter(
         "test_mode",
@@ -43,7 +53,7 @@ class GlassMainDumpFlow(FlowSpec):
     date = Parameter(
         "date",
         help="Datetime of data-dump. MM/YYYY",
-        type=lambda x: datetime.datetime.strptime(x, '%m/%Y'),
+        type=lambda x: datetime.datetime.strptime(x, "%m/%Y"),
         required=True,
     )
 
@@ -53,9 +63,11 @@ class GlassMainDumpFlow(FlowSpec):
         logging.info("Loading raw data")
 
         if not all((k in self.s3_inputs.keys() for k in req_keys)):
-            raise ValueError(f"""`s3_inputs` requires keys: {req_keys}
+            raise ValueError(
+                f"""`s3_inputs` requires keys: {req_keys}
                              got: {list(self.s3_input.keys())}
-                             """)
+                             """
+            )
 
         if self.test_mode:
             nrows = 10_000
@@ -68,14 +80,17 @@ class GlassMainDumpFlow(FlowSpec):
 
             def test_filter(df: pd.DataFrame) -> pd.DataFrame:
                 """Load limited size dataframe for test mode"""
-                if 'id_organisation' not in df.columns:
+                if "id_organisation" not in df.columns:
                     return df
                 return df.loc[lambda x: x.id_organisation.isin(test_ids)]
+
         else:
             def test_filter(x: pd.DataFrame) -> pd.DataFrame:
                 return x
 
-        self.organisation = glass_df_loader(self.s3_inputs["organisation"]).pipe(test_filter)
+        self.organisation = glass_df_loader(self.s3_inputs["organisation"]).pipe(
+            test_filter
+        )
         self.address = glass_df_loader(self.s3_inputs["address"]).pipe(test_filter)
         self.sector = glass_df_loader(self.s3_inputs["sector"]).pipe(test_filter)
 
@@ -122,7 +137,11 @@ class GlassMainDumpFlow(FlowSpec):
 
         # Split off glass' in-house companies house match
         ch_match_cols = ["company_number", "company_number_match_type"]
-        self.organisation = organisation.drop(ch_match_cols, axis=1).join(low_quality).assign(date=self.date)
+        self.organisation = (
+            organisation.drop(ch_match_cols, axis=1)
+            .join(low_quality)
+            .assign(date=self.date)
+        )
         self.glass_company_match = organisation[["id_organisation", *ch_match_cols]]
 
         self.next(self.end)
@@ -135,7 +154,8 @@ class GlassMainDumpFlow(FlowSpec):
 
 if __name__ == "__main__":
     logging.basicConfig(
-        handlers=[logging.StreamHandler()], level=logging.INFO,
+        handlers=[logging.StreamHandler()],
+        level=logging.INFO,
     )
 
     GlassMainDumpFlow()
