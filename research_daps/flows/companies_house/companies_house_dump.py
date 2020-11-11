@@ -14,7 +14,7 @@ from utils import (
 from metaflow import FlowSpec, Parameter, step
 
 DATA_DUMP_PATH = (
-    "s3://nesta-glass/companies_house/BasicCompanyDataAsOneFile-2020-07-01.csv"
+    "s3://nesta-glass/companies_house/BasicCompanyDataAsOneFile-2020-07-01.zip"
 )
 DATA_DUMP_PATH = (
     "/media/s3fs/companies_house/BasicCompanyDataAsOneFile-2020-07-01.zip"
