@@ -998,7 +998,7 @@ Resources:
       Type: MANAGED
       ServiceRole: !GetAtt 'BatchExecutionRole.Arn'
       ComputeResources:
-        MaxvCpus: !Ref MaxVCPUBatch
+        MaxvCpus: 256
         SecurityGroupIds:
           - !GetAtt VPC.DefaultSecurityGroup
         Type: EC2
