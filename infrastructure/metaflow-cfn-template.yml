@@ -39,6 +39,10 @@ Parameters:
       Type: CommaDelimitedList
       Default: "m4.large,m4.xlarge,m4.2xlarge,m4.4xlarge"
       Description: "The instance types for the compute environment as a comma-separated list"
+  ComputeEnvManyInstanceTypes:
+      Type: CommaDelimitedList
+      Default: "m4.large"
+      Description: "The instance types for the compute environment as a comma-separated list"
   ComputeEnvGPUInstanceTypes:
       Type: CommaDelimitedList
       Default: "g4dn.xlarge"
@@ -988,6 +992,25 @@ Resources:
         DesiredvCpus: !Ref DesiredVCPUBatch
         Ec2KeyPair: metaflow-test
       State: ENABLED
+  ComputeEnvironmentMany:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      Type: MANAGED
+      ServiceRole: !GetAtt 'BatchExecutionRole.Arn'
+      ComputeResources:
+        MaxvCpus: !Ref MaxVCPUBatch
+        SecurityGroupIds:
+          - !GetAtt VPC.DefaultSecurityGroup
+        Type: EC2
+        Subnets:
+          - !Ref Subnet1
+          - !Ref Subnet2
+        MinvCpus: !Ref MinVCPUBatch
+        InstanceRole: !GetAtt 'ECSInstanceProfile.Arn'
+        InstanceTypes: !Ref ComputeEnvManyInstanceTypes
+        DesiredvCpus: !Ref DesiredVCPUBatch
+        Ec2KeyPair: metaflow-test
+      State: ENABLED
   ComputeEnvironmentGPU:
     Type: AWS::Batch::ComputeEnvironment
     Properties:
@@ -1018,6 +1041,16 @@ Resources:
       State: ENABLED
       Priority: 1
       JobQueueName: !Join [ "-", [ 'job-queue-GPU', !Ref 'AWS::StackName' ] ]
+  JobQueueMany:
+    DependsOn: ComputeEnvironment
+    Type: AWS::Batch::JobQueue
+    Properties:
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref ComputeEnvironmentMany
+      State: ENABLED
+      Priority: 1
+      JobQueueName: !Join [ "-", [ 'job-queue', !Ref 'AWS::StackName' ] ]
   JobQueue:
     DependsOn: ComputeEnvironment
     Type: AWS::Batch::JobQueue
