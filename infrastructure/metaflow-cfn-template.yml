@@ -1050,7 +1050,7 @@ Resources:
           ComputeEnvironment: !Ref ComputeEnvironmentMany
       State: ENABLED
       Priority: 1
-      JobQueueName: !Join [ "-", [ 'job-queue', !Ref 'AWS::StackName' ] ]
+      JobQueueName: !Join [ "-", [ 'job-queue-many', !Ref 'AWS::StackName' ] ]
   JobQueue:
     DependsOn: ComputeEnvironment
     Type: AWS::Batch::JobQueue
