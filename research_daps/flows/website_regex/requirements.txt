@@ -3,3 +3,4 @@ toolz
 beautifulsoup4
 selenium
 lxml
+tenacity

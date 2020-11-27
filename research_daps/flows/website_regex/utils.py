@@ -6,7 +6,7 @@ TODO:
 """
 import logging
 import re
-from collections import defaultdict, Counter
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait
 from itertools import chain
 from typing import List, Iterable, Dict, Optional
@@ -20,6 +20,13 @@ from selenium.webdriver.chrome.webdriver import WebDriver
 from selenium.common.exceptions import WebDriverException, TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.chrome.options import Options
+from tenacity import (
+    RetryError,
+    retry,
+    wait_fixed,
+    retry_if_exception_type,
+    stop_after_attempt,
+)
 
 TWITTER_HANDLE_FORMAT = r"[a-zA-Z0-9_]{1,15}"
 
@@ -56,17 +63,38 @@ def twitter_regex_matches(text: str) -> List[str]:
     )
 
 
-@t.curry
-def get(driver, url: str) -> str:
+class PossibleSchemeError(Exception):
+    """Indicates Selenium scraping failed, likely due to scheme error."""
+
+    pass
+
+
+@retry(
+    wait=wait_fixed(2),
+    retry=retry_if_exception_type(TimeoutException),
+    stop=stop_after_attempt(3),
+)
+def get(driver: WebDriver, url: str) -> Optional[str]:
     """GET `url` returning raw content response if successful."""
-    driver.get(url)
+    driver.get("data:;")  # Avoid polluting state
 
-    # Wait up to 10 seconds for document readstate to be "complete"
-    WebDriverWait(driver, 10).until(
-        lambda driver: driver.execute_script("return document.readyState") == "complete"
-    )
+    try:
+        driver.get(url)
+        # Wait up to 10 seconds for document readstate to be "complete"
+        WebDriverWait(driver, 10).until(
+            lambda driver: driver.execute_script("return document.readyState")
+            == "complete"
+        )
+        return driver.page_source
+    except WebDriverException as e:
+        handle_webdriver_exception(e)
+        logging.warning(f"{url} got error {e.msg}")
+    except TimeoutException:
+        pass
+    except RetryError:
+        logging.warning(f"Retry attempts failed for {url}")
 
-    return driver.page_source
+    return None
 
 
 def discover_anchor_tags(text: str) -> ResultSet:
@@ -128,6 +156,9 @@ def default_to_https(url: str) -> str:
     else:
         return url
 
+def https_to_http(url: str) -> str:
+    """Swap use of https to http."""
+    return url.replace("https://", "http://")
 
 @t.curry
 def resolve_link(full_url: str, link: str) -> str:
@@ -148,88 +179,78 @@ def chrome_driver() -> WebDriver:
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-dev-shm-usage")  # Docker /dev/shm too small
     driver = webdriver.Chrome(options=chrome_options)
-    driver.set_page_load_timeout(10)
-    driver.set_script_timeout(10)
+    driver.set_page_load_timeout(20)
+    driver.set_script_timeout(20)
     return driver
 
 
-def link_finder(driver: WebDriver, url: str) -> Optional[List[str]]:
+def link_finder(driver: WebDriver, url: str, n: int = 4) -> Optional[List[str]]:
     """Discover links for `url`."""
 
-    n = 4
+    url = default_to_https(url)
     try:
-        content = get(driver, default_to_https(url))
-    except WebDriverException as e:
-        if "net::ERR_NAME_NOT_RESOLVED" in e.msg:
-            logging.warning(f"Couldn't resolve URL: {url}")
-            return []
-        else:
-            logging.warning(f"{url} got error {e.msg}")
-            return []
-    except TimeoutException:
-        logging.warning(f"Timeout on: {url}")
-        return []
+        content = get(driver, url)
+    except PossibleSchemeError:
+        logging.warning(url)
+        url = https_to_http(url)
+        logging.warning(url)
+        content = get(driver, url)
 
-    return t.pipe(
-        content,
-        find_links,
-        t.filter(is_internal_link(url)),
-        take_best_link_candidates(n),
-        t.map(t.compose(resolve_link(url))),
-        list,
-    )
+    if content is None:
+        return []
+    else:
+        return t.pipe(
+            content,
+            find_links,
+            t.filter(is_internal_link(url)),
+            take_best_link_candidates(n),
+            t.map(t.compose(resolve_link(url))),
+            list,
+        )
+
+
+def handle_webdriver_exception(exception: WebDriverException) -> None:
+    """Handle WebDriverException cases."""
+
+    if "net::ERR_NAME_NOT_RESOLVED" in exception.msg:
+        return
+    elif "net::ERR_SSL_PROTOCOL_ERR" in exception.msg:
+        raise PossibleSchemeError(exception.msg)
+    elif "net::ERR_CONNECTION_REFUSED" in exception.msg:
+        raise PossibleSchemeError(exception.msg)
+    elif "net::ERR_CONNECTION_CLOSED" in exception.msg:
+        raise PossibleSchemeError(exception.msg)
+    elif "net::ERR_SSL_VERSION_OR_CIPHER_MISMATCH" in exception.msg:
+        raise PossibleSchemeError(exception.msg)
+    elif "Timed out receiving message from renderer" in exception.msg:
+        raise PossibleSchemeError(exception.msg)
+    else:
+        return
 
 
 def handle_finder(driver: WebDriver, url: str) -> Dict[str, Dict[str, int]]:
     """."""
     netloc = parse_url(url).netloc
+
     try:
         content = get(driver, url)
-    except WebDriverException as e:
-        if "net::ERR_NAME_NOT_RESOLVED" in e.msg:
-            logging.warning(f"Couldn't resolve URL: {url}")
-            return {netloc: {}}
-        else:
-            logging.warning(f"{url} got error {e.msg}")
-            return {netloc: {}}
-    except TimeoutException:
-        logging.warning(f"Timeout on: {url}")
+    except PossibleSchemeError:
+        url = https_to_http(url)
+        content = get(driver, url)
+
+    if content is None:
         return {netloc: {}}
 
-    handles = twitter_regex_matches(str(soup_for_regex(content)))
-    return {netloc: dict(Counter(handles))}
+    try:
+        handles = twitter_regex_matches(str(soup_for_regex(content)))
+        return {netloc: dict(Counter(handles))}
+    except RecursionError:
+        logging.error(f"Recursion error for {url}")
+        return {netloc: {}}
 
 
 if __name__ == "__main__":
-    assert 0
-    handle_lookup: Dict[str, Counter] = defaultdict(Counter)
-
     urls: List[str] = ["https://nesta.org.uk/", "https://twitter.com"] * 2
 
-    def chunk_link_finder(urls):
-        with chrome_driver() as driver:
-            return list(map(lambda x: link_finder(driver, x), urls))
-
-    n_processes = 8
-    chunksize = max(1, len(urls) // n_processes)
-    print(chunksize)
-
-    with ThreadPoolExecutor(n_processes) as executor:
-        futures = [
-            executor.submit(chunk_link_finder, url_chunk)
-            for url_chunk in t.partition_all(chunksize, urls)
-        ]
-    wait(futures)
-
-    links = t.pipe(futures, t.map(lambda x: x.result()), chain.from_iterable, list)
-    print(links)
-    print(len(list(filter(lambda x: len(x) == 0, links))))
-
-    def chunk_handle_finder(urls):
-        with chrome_driver() as driver:
-            return list(map(lambda x: handle_finder(driver, x), urls))
-
-    with ThreadPoolExecutor(n_processes) as executor:
-        handles = list(executor.map(chunk_handle_finder, links))
-    print(handles)
