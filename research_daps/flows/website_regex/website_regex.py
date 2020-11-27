@@ -1,6 +1,5 @@
 """Metaflow pipeline to run regexes over websites."""
 import logging
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,14 +18,12 @@ pip_install()
 
 import toolz.curried as t
 from metaflow import (
-    # Run,
     FlowSpec,
     IncludeFile,
     Parameter,
     step,
     JSONType,
-    # S3,
-    # resources,
+    resources,
 )
 
 from utils import chrome_driver, link_finder, handle_finder
@@ -84,6 +81,7 @@ class WebsiteRegex(FlowSpec):
 
         self.next(self.link_finder, foreach="url_chunks")
 
+    @resources(cpu=1)
     @step
     def link_finder(self):
         pip_install()
@@ -106,6 +104,7 @@ class WebsiteRegex(FlowSpec):
         self.url_chunks = list(self.chunk_data(self.links))
         self.next(self.regexer, foreach="url_chunks")
 
+    @resources(cpu=1)
     @step
     def regexer(self):
         pip_install()
