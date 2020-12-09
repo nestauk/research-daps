@@ -82,6 +82,10 @@ def test_is_internal_link():
 
     assert not is_internal_link(full_url, f"https://facebook.com/feed?link={full_url}")
 
+    assert not is_internal_link(full_url, "//+1418125232″")
+    
+    # Failing cases:
+    assert is_internal_link(full_url, "[~~]")
 
 def test_find_links():
     pass

@@ -7,17 +7,20 @@ TODO:
 import logging
 import re
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, wait
 from itertools import chain
-from typing import List, Iterable, Dict, Optional
-from urllib3.util.url import parse_url
+from typing import List, Iterable, Dict, Optional, Callable
+from urllib3.util.url import parse_url as parse_url_
+from urllib3.exceptions import LocationParseError
 
 import toolz.curried as t
 from bs4 import BeautifulSoup, SoupStrainer
 from bs4.element import ResultSet
 from selenium import webdriver
 from selenium.webdriver.chrome.webdriver import WebDriver
-from selenium.common.exceptions import WebDriverException, TimeoutException
+from selenium.common.exceptions import (
+    WebDriverException,
+    TimeoutException,
+)
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.chrome.options import Options
 from tenacity import (
@@ -32,7 +35,7 @@ TWITTER_HANDLE_FORMAT = r"[a-zA-Z0-9_]{1,15}"
 
 
 def twitter_handle_regex() -> str:
-    """."""
+    """Regex to find twitter handles."""
 
     pre = r"\B"
     post = r"[\s.,<]"  # Allow whitespace and some punctuation after handle
@@ -45,7 +48,7 @@ def twitter_handle_regex() -> str:
 
 
 def twitter_link_regex() -> str:
-    """."""
+    """Regex to find links to 'twitter.com'."""
     return r"twitter.com/({})".format(TWITTER_HANDLE_FORMAT)
 
 
@@ -69,32 +72,109 @@ class PossibleSchemeError(Exception):
     pass
 
 
+class BrowserCrashException(Exception):
+    """Indicates Selenium scraping failed due to browser crash."""
+
+    pass
+
+
+class Driver(object):
+    """Callable wrapper for Selenium driver that returns a new driver after crash."""
+
+    def __init__(self):
+        """Initialise selenium driver."""
+        self.driver = chrome_driver()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.driver.quit()
+
+    def __call__(self):
+        """Returns selenium driver on blank page with valid session."""
+        from urllib3.exceptions import MaxRetryError
+
+        try:
+            self.driver.get("data:;")  # Reset state for next get
+        except MaxRetryError as e:
+            logging.error(f"Error wiping driver state: {e}")
+            self.restart_driver()
+        except WebDriverException as e:
+            if ("invalid session id" in e.msg) or ("session deleted" in e.msg):
+                self.restart_driver()
+            else:
+                logging.error(f"Driver error: {e.msg}")
+                raise e
+        return self.driver
+
+    def restart_driver(self):
+        """Restarts selenium driver."""
+        logging.debug("Restarting driver...")
+        try:
+            self.driver.quit()
+        except Exception as e:
+            logging.error(f"Failed to close old driver: {e}")
+        try:
+            self.driver = chrome_driver()
+        except Exception as e:
+            logging.error(f"Failed to restart: {e}")
+
+
 @retry(
     wait=wait_fixed(2),
-    retry=retry_if_exception_type(TimeoutException),
-    stop=stop_after_attempt(3),
+    retry=(
+        retry_if_exception_type(TimeoutException)
+        | retry_if_exception_type(BrowserCrashException)
+    ),
+    stop=stop_after_attempt(2),
 )
-def get(driver: WebDriver, url: str) -> Optional[str]:
+def get(driver: Callable[[], WebDriver], url: str) -> Optional[str]:
     """GET `url` returning raw content response if successful."""
-    driver.get("data:;")  # Avoid polluting state
+
+    def get_(driver, url):
+        try:
+            logging.debug(f"Getting {url}")
+            driver_ = driver()
+            driver_.get(url)
+            # Wait up to 10 seconds for document readstate to be "complete"
+            WebDriverWait(driver_, 10).until(
+                lambda driver: driver.execute_script("return document.readyState")
+                == "complete"
+            )
+            return driver_.page_source
+        except WebDriverException as e:
+            possible_scheme_error_msgs = [
+                "net::ERR_SSL_PROTOCOL_ERR",
+                "net::ERR_CONNECTION_RESET",
+                "net::ERR_CONNECTION_REFUSED",
+                "net::ERR_CONNECTION_CLOSED",
+                "net::ERR_SSL_VERSION_OR_CIPHER_MISMATCH",
+            ]
+            if (
+                any([msg in e.msg for msg in possible_scheme_error_msgs])
+                and parse_url(url).scheme != "http"
+            ):
+                raise PossibleSchemeError(e.msg)
+            elif "Timed out receiving message from renderer" in e.msg:
+                raise TimeoutException(e.msg)  # Captured by retry
+            elif ("invalid session" in e.msg) or (
+                "session deleted because of page crash" in e.msg
+            ):
+                logging.error(f"{url} got error {e.msg}")
+                raise BrowserCrashException(e.msg)  # Captured by retry
+            else:  # Includes "net::ERR_NAME_NOT_RESOLVED"
+                return None
+            logging.warning(f"{url} got error {e.msg}")
+        except TimeoutException:
+            raise  # Captured by retry
 
     try:
-        driver.get(url)
-        # Wait up to 10 seconds for document readstate to be "complete"
-        WebDriverWait(driver, 10).until(
-            lambda driver: driver.execute_script("return document.readyState")
-            == "complete"
-        )
-        return driver.page_source
-    except WebDriverException as e:
-        handle_webdriver_exception(e)
-        logging.warning(f"{url} got error {e.msg}")
-    except TimeoutException:
-        pass
-    except RetryError:
-        logging.warning(f"Retry attempts failed for {url}")
-
-    return None
+        return get_(driver, url)
+    except PossibleSchemeError:  # Retry with modified argument
+        logging.info(f"Trying {url} with 'http://' scheme")
+        url = https_to_http(url)
+        return get_(driver, url)
 
 
 def discover_anchor_tags(text: str) -> ResultSet:
@@ -121,9 +201,14 @@ def extract_links_from_anchor_results(anchors: ResultSet) -> Iterable[str]:
 @t.curry
 def is_internal_link(full_url: str, link: str) -> bool:
     """Checks if `link` is a link to another page in the same location as `full_url`."""
-    return link.startswith("/") or (
-        get_network_location(full_url) == get_network_location(link) in link
-    )
+    try:
+        url = parse_url(link)
+        return (not url.netloc and url.path) or (
+            get_network_location(full_url) == get_network_location(link)
+        )
+    except LocationParseError:
+        logging.warning(f"Failed to parse one of: ['{full_url}', '{link}']")
+        return False
 
 
 def get_network_location(link: str) -> str:
@@ -156,9 +241,16 @@ def default_to_https(url: str) -> str:
     else:
         return url
 
+
 def https_to_http(url: str) -> str:
     """Swap use of https to http."""
     return url.replace("https://", "http://")
+
+
+def parse_url(url: str):
+    """Safer parse url by stripping weird characters first."""
+    return parse_url_(url.strip("‘'\""))
+
 
 @t.curry
 def resolve_link(full_url: str, link: str) -> str:
@@ -176,6 +268,10 @@ def resolve_link(full_url: str, link: str) -> str:
 
 def chrome_driver() -> WebDriver:
     chrome_options = Options()
+
+    chrome_options.add_experimental_option(  # Don't download images:
+        "prefs", {"profile.managed_default_content_settings.images": 2}
+    )
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-gpu")
@@ -186,59 +282,64 @@ def chrome_driver() -> WebDriver:
     return driver
 
 
-def link_finder(driver: WebDriver, url: str, n: int = 4) -> Optional[List[str]]:
+def link_finder(
+    driver: Callable[[], WebDriver], url: str, n: int = 4
+) -> Optional[List[str]]:
     """Discover links for `url`."""
 
     url = default_to_https(url)
     try:
         content = get(driver, url)
-    except PossibleSchemeError:
-        logging.warning(url)
-        url = https_to_http(url)
-        logging.warning(url)
-        content = get(driver, url)
+    except RetryError:
+        logging.warning(f"Retry attempts failed for {url}")
+        return []
+    # except WebDriverException as e:
+    #     logging.warning(f"{url}: {e.msg}")
+    #     if "invalid session" in e.msg:
+    #         raise
+    #     return []
+    # except TimeoutException as e:
+    #     logging.warning(f"{url}: {e.msg}")
+    #     return []
 
     if content is None:
         return []
     else:
-        return t.pipe(
-            content,
-            find_links,
-            t.filter(is_internal_link(url)),
-            take_best_link_candidates(n),
-            t.map(t.compose(resolve_link(url))),
-            list,
-        )
+        try:
+            return t.pipe(
+                content,
+                find_links,
+                t.filter(is_internal_link(url)),
+                take_best_link_candidates(n),
+                t.map(resolve_link(url)),
+                list,
+            )
+        except Exception as e:
+            logging.error(e)
+            return []
 
 
-def handle_webdriver_exception(exception: WebDriverException) -> None:
-    """Handle WebDriverException cases."""
-
-    if "net::ERR_NAME_NOT_RESOLVED" in exception.msg:
-        return
-    elif "net::ERR_SSL_PROTOCOL_ERR" in exception.msg:
-        raise PossibleSchemeError(exception.msg)
-    elif "net::ERR_CONNECTION_REFUSED" in exception.msg:
-        raise PossibleSchemeError(exception.msg)
-    elif "net::ERR_CONNECTION_CLOSED" in exception.msg:
-        raise PossibleSchemeError(exception.msg)
-    elif "net::ERR_SSL_VERSION_OR_CIPHER_MISMATCH" in exception.msg:
-        raise PossibleSchemeError(exception.msg)
-    elif "Timed out receiving message from renderer" in exception.msg:
-        raise PossibleSchemeError(exception.msg)
-    else:
-        return
-
-
-def handle_finder(driver: WebDriver, url: str) -> Dict[str, Dict[str, int]]:
+def handle_finder(
+    driver: Callable[[], WebDriver], url: str
+) -> Dict[str, Dict[str, int]]:
     """."""
-    netloc = parse_url(url).netloc
+    try:
+        netloc = parse_url(url).netloc
+    except LocationParseError as e:  # TODO : this shouldn't happen
+        logging.error(e)
+        return {f"__BADPARSE__{url}": {}}  # XXX : BAD!
 
     try:
         content = get(driver, url)
-    except PossibleSchemeError:
-        url = https_to_http(url)
-        content = get(driver, url)
+    except RetryError:
+        logging.warning(f"Retry attempts failed for {url}")
+        return {netloc: {}}
+    # except WebDriverException as e:
+    #     logging.warning(f"{url}: {e.msg}")
+    #     return {netloc: {}}
+    # except TimeoutException as e:
+    #     logging.warning(f"{url}: {e.msg}")
+    #     return {netloc: {}}
 
     if content is None:
         return {netloc: {}}
@@ -249,8 +350,3 @@ def handle_finder(driver: WebDriver, url: str) -> Dict[str, Dict[str, int]]:
     except RecursionError:
         logging.error(f"Recursion error for {url}")
         return {netloc: {}}
-
-
-if __name__ == "__main__":
-    urls: List[str] = ["https://nesta.org.uk/", "https://twitter.com"] * 2
-
