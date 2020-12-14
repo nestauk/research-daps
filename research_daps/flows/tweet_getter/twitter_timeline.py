@@ -16,7 +16,6 @@ from metaflow import (
     S3,
 )
 
-from tweepy_utils import user_timeline_tweets, handle_prefix
 
 
 logger.remove()
@@ -66,6 +65,7 @@ class TwitterTimeline(FlowSpec):
     @step
     def start(self):
         """Collect tweets using tweepy."""
+        from tweepy_utils import user_timeline_tweets, handle_prefix
 
         handles = self.handle_file.split("\n")
 
