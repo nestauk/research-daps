@@ -1,46 +1,43 @@
-"""Metaflow pipeline to run regexes over websites."""
+"""Metaflow pipeline to run a regex over a set of websites."""
 import json
 import logging
-import subprocess
-import sys
-from pathlib import Path
+import re
 from itertools import chain
-from typing import Dict, List
-
-
-def pip_install():
-    path = str(Path(__file__).parents[0] / "requirements.txt")
-    output = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-r", path], capture_output=True
-    )
-    if output.stderr:
-        print("Install errors:", output.stderr)
-    return output
-
-
-pip_install()
+from typing import Collection, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 import toolz.curried as t
 from metaflow import (
-    FlowSpec,
-    IncludeFile,
-    Parameter,
-    step,
-    JSONType,
+    conda_base,
+    current,
     resources,
     retry,
+    step,
+    IncludeFile,
+    FlowSpec,
+    Parameter,
     S3,
-    current,
 )
 
-from utils import link_finder, handle_finder, Driver
+T = TypeVar("T")
 
 
 def joiner(regex_matches: List[Dict[str, Dict[str, int]]]) -> Dict[str, Dict[str, int]]:
+    """Join `regex_matches` by summing the `int` counts on matching keys."""
     return t.merge_with(lambda x: t.merge_with(sum, x), regex_matches)
 
 
+@conda_base(
+    libraries={
+        "toolz": "0.11.0",
+        "beautifulsoup4": "4.9.3",
+        "selenium": ">=3.141.0",
+        "lxml": ">=4.5.1",
+        "tenacity": ">=6.2.0",
+    }
+)
 class WebsiteRegex(FlowSpec):
+    """Metaflow pipeline to run a regex over a set of websites."""
+
     seed_url_file = IncludeFile(
         "seed-url-file",
         help="Newline delimited URL seed list",
@@ -60,28 +57,33 @@ class WebsiteRegex(FlowSpec):
         default=True,
     )
 
-    def chunk_data(self, data, chunksize=None):
-        if chunksize is None:
-            chunksize_ = len(self.seed_urls_)
-        else:
-            chunksize_ = chunksize
+    regex = Parameter(
+        "regex",
+        help="The regular expression to run over the collection of URLs",
+        type=str,
+        required=True,
+    )
 
-        if self.test_mode:
-            chunksize_ = 2
+    def chunk_data(
+        self, data: Collection[T], chunksize: Optional[int] = None
+    ) -> Iterable[Tuple[T]]:
+        """Split `data` into chunks of `chunksize`.
 
-        print(f"Data of length {len(data)} split into chunks of {chunksize_}")
-        return t.partition(chunksize_, data)
+        Truncates data and the size of chunks if `self.test_mode`.
+        """
+        chunksize_ = (chunksize or len(data)) if not self.test_mode else 2
+
+        logging.info(f"Data of length {len(data)} split into chunks of {chunksize_}")
+        return t.pipe(
+            data, t.partition(chunksize_), t.take(2 if self.test_mode else None)
+        )
 
     @step
     def start(self):
-        """ """
-        pip_install()
+        """Process and chunk seed URL's ready to be run in parallel batches."""
 
+        print(self.foo())
         self.seed_urls = self.seed_url_file.split("\n")
-
-        if self.test_mode:
-            self.seed_urls = list(t.take(4, self.seed_urls))
-
         self.url_chunks = list(self.chunk_data(self.seed_urls, self.chunksize))
 
         self.next(self.link_finder, foreach="url_chunks")
@@ -90,7 +92,9 @@ class WebsiteRegex(FlowSpec):
     @resources(cpu=1)
     @step
     def link_finder(self):
-        pip_install()
+        """Find internal links for each seed URL."""
+        from utils import link_finder, Driver
+
         urls = self.input
         with Driver() as driver:
             self.links = list(
@@ -101,12 +105,13 @@ class WebsiteRegex(FlowSpec):
 
     @step
     def join_link_finder(self, inputs):
+        """Join found links from each batch into single list."""
         self.links = list(chain.from_iterable([input_.links for input_ in inputs]))
         self.next(self.regexer_dispatch)
 
     @step
     def regexer_dispatch(self):
-        pip_install()
+        """Chunk and enumerate list of links ready to be run in parallel batches."""
         self.url_chunks_enumerated = list(
             enumerate(self.chunk_data(self.links, 250))
         )  # TODO : parameterise
@@ -116,7 +121,12 @@ class WebsiteRegex(FlowSpec):
     @resources(cpu=1)
     @step
     def regexer(self):
-        pip_install()
+        """Run `self.regex` over each links page source.
+
+        Only performs work for chunks not already completed.
+        """
+        from utils import match_finder, Driver
+
         chunk_number, urls = self.input
 
         run_id = str(current.origin_run_id or current.run_id)
@@ -130,24 +140,21 @@ class WebsiteRegex(FlowSpec):
                 completed_already = False
 
         if not completed_already:
+            regex = re.compile(self.regex)
             with Driver() as driver:
-                self.handles = list(map(lambda x: handle_finder(driver, x), urls))
+                self.handles = list(map(lambda x: match_finder(driver, regex, x), urls))
 
             with S3(s3root="s3://nesta-glass/twitter_handles/") as s3:
-                s3.put(
-                    f"{run_id}/{chunk_number}", json.dumps(self.handles)
-                )
+                s3.put(f"{run_id}/{chunk_number}", json.dumps(self.handles))
         else:
             with S3(s3root="s3://nesta-glass/twitter_handles/") as s3:
-                self.handles = json.loads(
-                    s3.get(f"{run_id}/{chunk_number}").text
-                )
+                self.handles = json.loads(s3.get(f"{run_id}/{chunk_number}").text)
 
         self.next(self.join_regexer)
 
     @step
     def join_regexer(self, inputs):
-        pip_install()
+        """Join regex match counts from each batch into single dict."""
         regex_matches = list(chain.from_iterable((input_.handles for input_ in inputs)))
         self.regex_matches_by_domain = joiner(regex_matches)
 
@@ -155,7 +162,6 @@ class WebsiteRegex(FlowSpec):
 
     @step
     def end(self):
-        # pip_install()
         pass
 
 

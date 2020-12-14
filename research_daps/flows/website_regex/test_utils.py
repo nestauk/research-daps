@@ -1,7 +1,6 @@
 import pytest
 
 from utils import (
-    twitter_regex_matches,
     discover_anchor_tags,
     extract_links_from_anchor_results,
     get_network_location,
@@ -16,31 +15,6 @@ def html_sample():
     <a>lonely</a>
     <b>don't parse this</b>
     <a><a href='google.com/link'>nested</a></a>"""
-
-
-@pytest.fixture
-def twitter_text_sample():
-    return """twitter.com/url_handle some text @repeat @bar @dont_allow@adjoining twitter@handles no 
-    dangling @ @'s no @reallylongtwittername but @underscores_ ok @no-dashes
-    @repeat text @us_fullstop. <a href="https://twitter.com/handle_in_link">@in_html</a> @endoffile"""
-
-
-def test_twitter_regex_matches(twitter_text_sample):
-    handles = twitter_regex_matches(twitter_text_sample)
-    assert handles == [
-        "url_handle",
-        "repeat",
-        "bar",
-        "underscores_",
-        "repeat",
-        "us_fullstop",
-        "handle_in_link",
-        "in_html",
-        "endoffile",
-    ], handles
-
-    text = "no twitter handles here"
-    assert twitter_regex_matches(text) == []
 
 
 def test_discover_anchor_tags(html_sample):
@@ -83,9 +57,10 @@ def test_is_internal_link():
     assert not is_internal_link(full_url, f"https://facebook.com/feed?link={full_url}")
 
     assert not is_internal_link(full_url, "//+1418125232″")
-    
+
     # Failing cases:
     assert is_internal_link(full_url, "[~~]")
+
 
 def test_find_links():
     pass

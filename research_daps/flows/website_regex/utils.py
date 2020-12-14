@@ -1,14 +1,9 @@
-"""
-TODO:
-- DONE find twitter links
-- DONE find twitter handles within HTML
-- filter twitter links for endpoints like `intent`/`cards`
-"""
+"""Website Regex utility functions."""
 import logging
 import re
 from collections import Counter
 from itertools import chain
-from typing import List, Iterable, Dict, Optional, Callable
+from typing import List, Iterable, Dict, Optional, Callable, Pattern
 from urllib3.util.url import parse_url as parse_url_
 from urllib3.exceptions import LocationParseError
 
@@ -31,36 +26,11 @@ from tenacity import (
     stop_after_attempt,
 )
 
-TWITTER_HANDLE_FORMAT = r"[a-zA-Z0-9_]{1,15}"
 
+def regex_matches(regex: Pattern, text: str) -> List[str]:
+    """Runs a compiled regex on `text`, returning a flat list of all matches."""
 
-def twitter_handle_regex() -> str:
-    """Regex to find twitter handles."""
-
-    pre = r"\B"
-    post = r"[\s.,<]"  # Allow whitespace and some punctuation after handle
-    # 1. Hard word boundary (incl. HTML closing tag)
-    # 2. Capture `handle_format`
-    # 3. Either: `post` or $
-    return r"{}@({}){}|{}@({})$".format(
-        pre, TWITTER_HANDLE_FORMAT, post, pre, TWITTER_HANDLE_FORMAT
-    )
-
-
-def twitter_link_regex() -> str:
-    """Regex to find links to 'twitter.com'."""
-    return r"twitter.com/({})".format(TWITTER_HANDLE_FORMAT)
-
-
-_TWITTER_HANDLE_REGEX = twitter_handle_regex()
-_TWITTER_LINK_REGEX = twitter_link_regex()
-_TWITTER_REGEX = re.compile(r"{}|{}".format(_TWITTER_HANDLE_REGEX, _TWITTER_LINK_REGEX))
-
-
-def twitter_regex_matches(text: str) -> List[str]:
-    """Runs a regex on `text` to extract twitter handle candidates."""
-
-    matches = re.findall(_TWITTER_REGEX, text)
+    matches = re.findall(regex, text)
     return t.thread_last(
         matches, chain.from_iterable, t.filter(lambda x: x != ""), list
     )
@@ -319,10 +289,10 @@ def link_finder(
             return []
 
 
-def handle_finder(
-    driver: Callable[[], WebDriver], url: str
+def match_finder(
+    driver: Callable[[], WebDriver], regex: Pattern, url: str
 ) -> Dict[str, Dict[str, int]]:
-    """."""
+    """Match `regex` in the page source of `url`, returning count of matches."""
     try:
         netloc = parse_url(url).netloc
     except LocationParseError as e:  # TODO : this shouldn't happen
@@ -345,7 +315,7 @@ def handle_finder(
         return {netloc: {}}
 
     try:
-        handles = twitter_regex_matches(str(soup_for_regex(content)))
+        handles = regex_matches(regex, str(soup_for_regex(content)))
         return {netloc: dict(Counter(handles))}
     except RecursionError:
         logging.error(f"Recursion error for {url}")
