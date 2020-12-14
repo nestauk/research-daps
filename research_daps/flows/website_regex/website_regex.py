@@ -5,7 +5,6 @@ import re
 from itertools import chain
 from typing import Collection, Dict, Iterable, List, Optional, Tuple, TypeVar
 
-import toolz.curried as t
 from metaflow import (
     conda_base,
     current,
@@ -23,7 +22,8 @@ T = TypeVar("T")
 
 def joiner(regex_matches: List[Dict[str, Dict[str, int]]]) -> Dict[str, Dict[str, int]]:
     """Join `regex_matches` by summing the `int` counts on matching keys."""
-    return t.merge_with(lambda x: t.merge_with(sum, x), regex_matches)
+    from toolz.curried import merge_with
+    return merge_with(lambda x: merge_with(sum, x), regex_matches)
 
 
 @conda_base(
@@ -71,18 +71,19 @@ class WebsiteRegex(FlowSpec):
 
         Truncates data and the size of chunks if `self.test_mode`.
         """
+        from toolz.curried import pipe, partition, take
+
         chunksize_ = (chunksize or len(data)) if not self.test_mode else 2
 
         logging.info(f"Data of length {len(data)} split into chunks of {chunksize_}")
-        return t.pipe(
-            data, t.partition(chunksize_), t.take(2 if self.test_mode else None)
+        return pipe(
+            data, partition(chunksize_), take(2 if self.test_mode else None)
         )
 
     @step
     def start(self):
         """Process and chunk seed URL's ready to be run in parallel batches."""
 
-        print(self.foo())
         self.seed_urls = self.seed_url_file.split("\n")
         self.url_chunks = list(self.chunk_data(self.seed_urls, self.chunksize))
 
