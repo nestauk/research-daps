@@ -1,6 +1,7 @@
 ################################################################
-### Text automatically added by daps-utils metaflowtask-init ###
+# Text automatically added by daps-utils metaflowtask-init     #
 from .__initplus__ import load_current_version, __basedir__, load_config
+
 try:
     config = load_config()
 except ModuleNotFoundError as exc:
