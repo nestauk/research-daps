@@ -2,8 +2,9 @@
 import logging
 
 import pandas as pd
+from metaflow import conda_base, step, FlowSpec, Parameter
 
-import research_daps
+from breadcrumbs import drop_breadcrumb as talk_to_luigi
 from utils import (
     COLUMN_MAPPINGS,
     process_organisations,
@@ -11,17 +12,22 @@ from utils import (
     process_sectors,
     process_names,
 )
-from metaflow import FlowSpec, Parameter, step
 
 DATA_DUMP_PATH = (
     "s3://nesta-glass/companies_house/BasicCompanyDataAsOneFile-2020-07-01.zip"
 )
-DATA_DUMP_PATH = (
-    "/media/s3fs/companies_house/BasicCompanyDataAsOneFile-2020-07-01.zip"
+
+
+@conda_base(
+    libraries={
+        "toolz": "0.11.0",
+        "pandas": ">=1.0.0",
+        # "smart_open": ">=3.0.0",
+        # "fsspec": "<=0.8.4",
+        "s3fs": ">=0.4.1",
+    }
 )
-# NSPL_PATH = f"{research_daps.project_dir}/data/raw/nspl/Data/NSPL_NOV_2019_UK.csv"
-
-
+@talk_to_luigi
 class CompaniesHouseDump(FlowSpec):
     """ """
 
@@ -38,9 +44,6 @@ class CompaniesHouseDump(FlowSpec):
         type=str,
         default=DATA_DUMP_PATH,
     )
-    # nspl_path = Parameter(
-    #     "nspl_path", help="Path to NSPL data", type=str, default=NSPL_PATH
-    # )
 
     @step
     def start(self):
@@ -68,21 +71,6 @@ class CompaniesHouseDump(FlowSpec):
             .rename(columns=COLUMN_MAPPINGS)
             .drop_duplicates()
         )
-        # self.next(self.nspl)
-
-        # @step
-        # def nspl(self):
-        #     """ Load NSPL auxilliary dataset """
-
-        #     nspl_cols = [
-        #         "pcds",
-        #         "laua",
-        #         "lat",
-        #         "long",
-        #     ]
-        #     self._nspl = pd.read_csv(self.nspl_path, usecols=nspl_cols).rename(
-        #         columns={"pcds": "postcode"}
-        #     )
         self.next(self.do_organisation)
 
     @step
@@ -94,7 +82,7 @@ class CompaniesHouseDump(FlowSpec):
     @step
     def do_address(self):
         """ Process addresses """
-        self.address = process_address(self.raw)  # , self._nspl)
+        self.address = process_address(self.raw)
         self.next(self.do_sectors)
 
     @step

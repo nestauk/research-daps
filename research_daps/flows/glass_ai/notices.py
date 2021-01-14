@@ -1,19 +1,32 @@
 """ Metaflow pipeline to process raw Glass AI notices into dataframes """
-import subprocess
-import logging
 import datetime
-import sys
+import logging
 
-subprocess.run([sys.executable, '-m', 'pip', 'install', '--quiet', '-r', 'requirements.txt'])
-import pandas as pd
+# import subprocess
+# import sys
+# from pathlib import Path
 
-from process_raw import (
-    glass_df_loader,
-    process_notice,
+from metaflow import FlowSpec, Parameter, conda_base, step
+
+from breadcrumbs import drop_breadcrumb as talk_to_luigi
+
+# path = Path(__file__).resolve().parent / "requirements.txt"
+# output = subprocess.run(
+#     [sys.executable, "-m", "pip", "install", "-r", path], capture_output=True
+# )
+# print(output.stdout)
+# print(output.stderr)
+
+
+@conda_base(
+    libraries={
+        "toolz": "==0.11.0",
+        "pandas": ">=1.0.0",
+        "bulwark": ">=0.6.1",
+        "s3fs": "==0.5.1",
+    }
 )
-from metaflow import FlowSpec, Parameter, step
-
-
+@talk_to_luigi
 class GlassNoticesDumpFlow(FlowSpec):
     """ Clean and process raw Glass AI notices into dataframes """
 
@@ -33,22 +46,19 @@ class GlassNoticesDumpFlow(FlowSpec):
     date = Parameter(
         "date",
         help="Datetime of data-dump. MM/YYYY",
-        type=lambda x: datetime.datetime.strptime(x, '%m/%Y')
+        type=lambda x: datetime.datetime.strptime(x, "%m/%Y"),
     )
 
     @step
     def start(self):
         """ Load raw data """
-        logging.info("Loading raw data")
+        from process_raw import glass_df_loader
 
-        print(self.date)
-        print(pd.__version__)
+        logging.info("Loading raw data")
 
         if self.test_mode:
             nrows = 10_000
-            logging.warning(
-                f"TEST MODE: Constraining to first {nrows} notices..."
-            )
+            logging.warning(f"TEST MODE: Constraining to first {nrows} notices...")
         else:
             nrows = None
 
@@ -59,9 +69,10 @@ class GlassNoticesDumpFlow(FlowSpec):
     @step
     def process(self):
         """ Process tables """
+        from process_raw import process_notice
 
         logging.info("Processing Notice")
-        self.notices = process_notice(self.notices)
+        self.notices, self.term = process_notice(self.notices, self.date)
         self.next(self.end)
 
     @step
@@ -72,7 +83,8 @@ class GlassNoticesDumpFlow(FlowSpec):
 
 if __name__ == "__main__":
     logging.basicConfig(
-        handlers=[logging.StreamHandler()], level=logging.INFO,
+        handlers=[logging.StreamHandler()],
+        level=logging.INFO,
     )
 
     GlassNoticesDumpFlow()

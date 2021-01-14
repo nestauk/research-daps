@@ -1,10 +1,14 @@
 """ Functions to process raw Glass AI data into dataframes """
+import csv
+import datetime
 import logging
 import re
 from pathlib import Path
 from typing import Union, List, IO
 
 import pandas as pd
+
+# from smart_open import smart_open
 from toolz import merge
 
 import bulwark.decorators as dc
@@ -43,11 +47,42 @@ def _rename_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=lambda x: re.sub("organization", "organisation", x))
 
 
+# class ReadPreHook(object):
+#     """Run `prehook` on `smart_open`'able `file`."""
+
+#     def __init__(self, file, prehook):
+#         self.file = smart_open(file)
+#         self.prehook = prehook
+
+#     def __next__(self):
+#         return self.next()
+
+#     def __iter__(self):
+#         return self
+
+#     def read(self, *args, **kwargs):
+#         return self.__next__()
+
+#     def next(self):
+#         try:
+#             line: str = self.file.readline()
+#             return self.prehook(line)
+#         except Exception:
+#             self.file.close()
+#             raise StopIteration
+
+
 def glass_df_loader(filepath_or_buffer: Union[str, Path, IO], **kwargs) -> pd.DataFrame:
     """ Wrapper around `pandas.read_csv` to load glass file format and dtypes """
     dtypes = {"vat_number": object}
+    parsing = {
+        "sep": "\t",
+        "engine": "c",
+        "lineterminator": "\n",
+        "quoting": csv.QUOTE_NONE,
+    }
     kwargs["dtype"] = merge(kwargs.get("dtype", {}), dtypes)
-    kwargs["sep"] = "\t"
+    kwargs = merge(kwargs, parsing)
 
     return pd.read_csv(filepath_or_buffer, **kwargs).pipe(_rename_columns)
 
@@ -172,11 +207,29 @@ def process_address(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(postcode=postcodes.str.upper(), low_quality=low_quality)
 
 
-@dc.HasDtypes({"id_organisation": int})
-@dc.HasNoNans(["id_organisation", "url", "snippet"])
-def process_notice(df: pd.DataFrame) -> pd.DataFrame:
+# @dc.HasDtypes({"id_organisation": int})
+# @dc.HasNoNans(["id_organisation", "url", "snippet"])
+def process_notice(df: pd.DataFrame, date: datetime.date) -> pd.DataFrame:
     """ Process COVID notice table """
-    return df.assign(low_quality=lambda x: x.isnull().sum(axis=1))
+    df = df.assign(
+        notice_id=lambda x: x.index.astype(str) + "-" + date.strftime("%m/%Y"),
+        date=date,
+    )
+
+    notice = df[["notice_id", "id_organisation", "url", "snippet", "date"]].assign(
+        low_quality=lambda x: x.isnull().sum(axis=1)
+    )
+
+    # Generate mapping between orgs and terms
+    term = (
+        df.set_index("notice_id")
+        .matched_terms.str.split(";")
+        .explode()
+        .reset_index()
+        .assign(low_quality=lambda x: x.isnull().sum(axis=1))
+    )
+
+    return notice, term
 
 
 @dc.HasNoNans(["id_organisation", "sector_rank", "sector_name"])

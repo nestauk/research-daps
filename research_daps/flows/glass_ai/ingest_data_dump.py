@@ -4,7 +4,9 @@ import sys
 import os
 
 path = f"{os.path.dirname(os.path.realpath(__file__))}/requirements.txt"
-output = subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', path], capture_output=True)
+output = subprocess.run(
+    [sys.executable, "-m", "pip", "install", "-r", path], capture_output=True
+)
 print(output.stdout)
 print(output.stderr)
 
@@ -24,6 +26,7 @@ from daps_utils import talk_to_luigi
 
 
 req_keys = ["organisation", "address", "sector"]
+
 
 @talk_to_luigi
 class GlassMainDumpFlow(FlowSpec):
@@ -85,6 +88,7 @@ class GlassMainDumpFlow(FlowSpec):
                 return df.loc[lambda x: x.id_organisation.isin(test_ids)]
 
         else:
+
             def test_filter(x: pd.DataFrame) -> pd.DataFrame:
                 return x
 

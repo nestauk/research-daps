@@ -3,7 +3,6 @@ Companies House data processing
 """
 import logging
 import pandas as pd
-import research_daps
 
 logger = logging.getLogger(__name__)
 
