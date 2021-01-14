@@ -19,11 +19,23 @@ Updates:
 - Organisation.active
 
 """
-from sqlalchemy import Table, Column, Integer, TEXT, ForeignKey, Date, Boolean, VARCHAR, CHAR
+from sqlalchemy import (
+    Table,
+    Column,
+    Integer,
+    TEXT,
+    ForeignKey,
+    Date,
+    Boolean,
+    VARCHAR,
+    CHAR,
+)
 from sqlalchemy.orm import relationship, backref
 from research_daps import declarative_base
 
+ADDRESS_TEXT_CHAR_LIM = 300
 Base = declarative_base(prefix="glass_")
+
 
 class OrganisationAddress(Base):
     """Association object between organisations and addresses"""
@@ -93,7 +105,7 @@ class Organisation(Base):
     org_id = Column(Integer, primary_key=True, autoincrement=False)
     name = Column(
         VARCHAR(200),  # AB 10/11/20: 167 is longest name
-        unique=True,
+        # unique=True,  # AB 18/12/20 names can be duplicated with different PK's
         doc="Organisation name inferred by named entity recognition",
         index=True,
     )
@@ -164,10 +176,18 @@ class OrganisationDescription(Base):
 class Address(Base):
     """List of addresses found in websites"""
 
-    address_id = Column(Integer, primary_key=True, autoincrement=True)
-    address_text = Column(VARCHAR(300), nullable=False, doc="Full address text", unique=True)  # AB 10/11/20: 266 longest
+    address_id = Column(Integer, primary_key=True, autoincrement=False)
+    address_text = Column(
+        VARCHAR(ADDRESS_TEXT_CHAR_LIM, collation="utf8mb4_bin"),
+        nullable=False,
+        doc="Full address text",
+        unique=True,
+    )  # AB 10/11/20: 266 longest
     postcode = Column(VARCHAR(8), index=True, doc="Postcode of address")
     organisations = relationship("OrganisationAddress", back_populates="address")
+
+    def __repr__(self):
+        return f"Address: {self.__dict__}"
 
 
 class Notice(Base):
@@ -191,7 +211,9 @@ class CovidTerm(Base):
     """
 
     term_id = Column(Integer, primary_key=True, autoincrement=False)
-    term_string = Column(VARCHAR(100), nullable=False, unique=True, index=True)  # TODO length exploration
+    term_string = Column(
+        VARCHAR(100), nullable=False, unique=True, index=True
+    )  # TODO length exploration
     date = Column(
         Date,
         nullable=False,
@@ -219,7 +241,13 @@ class OrganisationCompaniesHouseMatch(Base):
     org_id = Column(
         "org_id", Integer, ForeignKey("glass_organisation.org_id"), primary_key=True
     )
-    # TODO: date
+    date = Column(
+        Date,
+        nullable=False,
+        index=True,
+        # primary_key=True,
+        doc="Date of data-dump associating company_id with org_id",
+    )
     company_match_type = Column(
         TEXT, nullable=False, doc="Type of match: MATCH_3,MATCH_4,MATCH_5"
     )

@@ -1,31 +1,76 @@
+import abc
 import datetime
+from pathlib import Path
+from typing import Dict, List, Any, Generator
+
 import metaflow as mf
 import luigi
-from luigi.contrib.s3 import S3PathTask
-from luigi.contrib.mysqldb import MySqlTarget
+import toolz.curried as t
+from numpy import nan
 from sqlalchemy_utils.functions import get_declarative_base
 from sqlalchemy.sql.expression import func
-from numpy import nan
 
-from daps_utils import CurateTask
-from daps_utils.parameters import SqlAlchemyParameter
-from daps_utils.db import db_session
-# from daps_utils.tasks import MetaflowTask
-import research_daps
+from daps_utils import CurateTask, MetaflowTask
+
+# from daps_utils.parameters import SqlAlchemyParameter
+from daps_utils.db import db_session, insert_data
+
 import research_daps.orms.glass as orms
 
 
-class GlassOrganisation(CurateTask):
+class GlassParameters(object):
+    """Mixin for parameters common to Glass Tasks."""
+
     date = luigi.DateParameter()
     dump_date = luigi.Parameter()
+    s3_inputs = luigi.Parameter()
 
-    def curate_data(self, _):
-        # TODO: Set every org to inactive
 
+class CurateDependentOnOtherCurateTask(CurateTask, GlassParameters):
+    """Requires a `MetaflowTask`, and another `CurateTask`.
+
+    The `CurateTask` dependency should be dependent on the same `MetaFlowTask`.
+
+    `run` changes from `CurateTask.run` to read `self.input()` as list.
+    """
+
+    def run(self):
+        self.s3path = self.input()[0].open("r").read()
+        data = self.curate_data(self.s3path)
+        with db_session(database="dev" if self.test else "production") as session:
+            # Create the table if it doesn't already exist
+            engine = session.get_bind()
+            Base = get_declarative_base(self.orm)
+            Base.metadata.create_all(engine)
+            # Insert the data
+            insert_data(data, self.orm, session, low_memory=self.low_memory)
+        return self.output().touch()
+
+    def requires(self):
+        tag = "dev" if self.test else "production"
+        yield MetaflowTask(
+            flow_path=self.flow_path,
+            flow_tag=tag,
+            rebuild_base=self.rebuild_base,
+            rebuild_flow=self.rebuild_flow,
+            flow_kwargs=self.flow_kwargs,
+            preflow_kwargs=self.preflow_kwargs,
+            container_kwargs=self.container_kwargs,
+            requires_task=self.requires_task,
+            requires_task_kwargs=self.requires_task_kwargs,
+        )
+        yield self.curate_task_dependency(
+            # GlassParameters(
+            **common_args(self, test=self.test),
+            orm=self.curate_orm_dependency,  # orms.Organisation,
+        )
+
+
+class GlassOrganisation(CurateTask, GlassParameters):
+    def curate_data(self, s3path):
         # Get glass flow data
-        data = mf.Flow("GlassMainDumpFlow").latest_successful_run.data.organisation
-
-        # TODO: Filter columns - query against existing
+        run_id = Path(s3path).name
+        data = mf.Run(f"GlassMainDumpFlow/{run_id}").data.organisation
 
         # Output as dict?
         return (
@@ -37,16 +82,17 @@ class GlassOrganisation(CurateTask):
         )
 
 
-class GlassOrganisationMetadata(CurateTask):
-    date = luigi.DateParameter()
-    dump_date = luigi.Parameter()
+class CurateDependentOnGlassOrganisation(CurateDependentOnOtherCurateTask):
+    curate_task_dependency = GlassOrganisation
+    curate_orm_dependency = orms.Organisation
 
-    def curate_data(self, _):
+
+class GlassOrganisationMetadata(CurateDependentOnGlassOrganisation):
+    def curate_data(self, s3path):
+        run_id = Path(s3path).name
         return (
-            mf.Flow("GlassMainDumpFlow")
-            .latest_successful_run.data.organisation.rename(
-                columns={"id_organisation": "org_id"}
-            )
+            mf.Run(f"GlassMainDumpFlow/{run_id}")
+            .data.organisation.rename(columns={"id_organisation": "org_id"})
             .assign(
                 date=datetime.datetime.strptime(self.dump_date, "%m/%Y").date(),
                 low_quality=lambda x: x.low_quality.fillna(False),
@@ -56,16 +102,12 @@ class GlassOrganisationMetadata(CurateTask):
         )
 
 
-class GlassOrganisationDescription(CurateTask):
-    date = luigi.DateParameter()
-    dump_date = luigi.Parameter()
-
-    def curate_data(self, _):
+class GlassOrganisationDescription(CurateDependentOnGlassOrganisation):
+    def curate_data(self, s3path):
+        run_id = Path(s3path).name
         return (
-            mf.Flow("GlassMainDumpFlow")
-            .latest_successful_run.data.organisation.rename(
-                columns={"id_organisation": "org_id"}
-            )
+            mf.Run(f"GlassMainDumpFlow/{run_id}")
+            .data.organisation.rename(columns={"id_organisation": "org_id"})
             .assign(
                 date=datetime.datetime.strptime(self.dump_date, "%m/%Y").date(),
             )[["org_id", "date", "description"]]
@@ -73,27 +115,46 @@ class GlassOrganisationDescription(CurateTask):
         ).to_dict(orient="records")
 
 
-class GlassAddress(CurateTask):
-    date = luigi.DateParameter()
-    dump_date = luigi.Parameter()
-
-    def curate_data(self, _):
-        return (
-            mf.Flow("GlassMainDumpFlow")
-            .latest_successful_run.data.address[["address_text", "postcode"]]
-            .drop_duplicates()
-            .loc[lambda x: ~x.address_text.str.lower().duplicated(keep=False)]
-        ).to_dict(orient="records")
+def generate_links(
+    data: List[Dict[str, Any]],
+    existing_addresses: Dict[str, orms.Address],
+    init_counter: int,
+):
+    counter = t.iterate(lambda x: x + 1, init_counter)
+    for _ in range(len(data)):
+        yield generate_link(data.pop(), existing_addresses, counter)
 
 
-class GlassOrganisationAddress(CurateTask):
-    date = luigi.DateParameter()
-    dump_date = luigi.Parameter()
+def generate_link(
+    row: Dict[str, Any], existing_addresses: Dict[str, orms.Address], counter: Generator
+):
+    """Generate `OrganisationAddress`, creating/linking `Address` where necessary."""
+    # Get existing address or create and insert new one
+    address = existing_addresses.setdefault(
+        collation(row["address_text"]),
+        # WARNING: mutation propagates out of the function!
+        orms.Address(
+            address_id=next(counter),
+            address_text=row["address_text"],
+            postcode=row["postcode"],
+        ),
+    )
+    return orms.OrganisationAddress(
+        org_id=row["org_id"], date=row["date"], rank=row["rank"], address=address
+    )
 
-    def curate_data(self, _):
+
+def collation(string: str) -> str:
+    """Processes `string` ready for comparison with other strings."""
+    return string.casefold()[: orms.ADDRESS_TEXT_CHAR_LIM]
+
+
+class AddressCurateTask(CurateDependentOnGlassOrganisation):
+    def curate_data(self, s3path):
+        run_id = Path(s3path).name
         links = (
-            mf.Flow("GlassMainDumpFlow")
-            .latest_successful_run.data.address.rename(
+            mf.Run(f"GlassMainDumpFlow/{run_id}")
+            .data.address.rename(
                 columns={
                     "id_organisation": "org_id",
                     "address_rank": "rank",
@@ -101,241 +162,98 @@ class GlassOrganisationAddress(CurateTask):
             )
             .assign(
                 date=datetime.datetime.strptime(self.dump_date, "%m/%Y").date(),
-                address_id=lambda x: x.index,
-            )[["org_id", "address_id", "date", "rank"]]
+            )
+            .dropna()
         )
+        print(f"Number of links: {links.shape[0]}")
 
         return links.to_dict(orient="records")
-
-
-class AddressCurateTask(luigi.Task):
-    """Run metaflow Flows in Docker, then curate the data
-    and store the result in a database table.
-    Args:
-        model (SqlAlchemy model): A SqlAlchemy ORM, indicating the table
-                                  of interest.
-        flow_path (str): Path to your flow, relative to the flows directory.
-        rebuild_base (bool): Whether or not to rebuild the docker image from
-                             scratch (starting with Dockerfile-base then
-                             Dockerfile). Only do this if you have changed
-                             Dockerfile-base.
-        rebuild_flow (bool): Whether or not to rebuild the docker image from
-                             the base image upwards (only implementing
-                             Dockerfile, not Dockerfile-base). This is done by
-                             default to include the latest changes to your flow
-        flow_kwargs (dict): Keyword arguments to pass to your flow as
-                            parameters (e.g. `{'foo':'bar'}` will be passed to
-                            the flow as `metaflow example.py run --foo bar`).
-        preflow_kwargs (dict): Keyword arguments to pass to metaflow BEFORE the
-                               run command (e.g. `{'foo':'bar'}` will be passed
-                               to the flow as `metaflow example.py --foo bar run`).
-        container_kwargs (dict): Additional keyword arguments to pass to the
-                                 docker run command, e.g. mem_limit for setting
-                                 the memory limit. See the python-docker docs
-                                 for full information.
-        requires_task (luigi.Task): Any task that this task is dependent on.
-        requires_task_kwargs (dict): Keyword arguments to pass to any dependent
-                                     task, if applicable.
-    """
-
-    orm = SqlAlchemyParameter()
-    flow_path = luigi.Parameter()
-    rebuild_base = luigi.BoolParameter(default=False)
-    rebuild_flow = luigi.BoolParameter(default=True)
-    flow_kwargs = luigi.DictParameter(default={})
-    preflow_kwargs = luigi.DictParameter(default={})
-    container_kwargs = luigi.DictParameter(default={})
-    requires_task = luigi.TaskParameter(default=S3PathTask)
-    requires_task_kwargs = luigi.DictParameter(default={})
-    low_memory = luigi.BoolParameter(default=True)
-    test = luigi.BoolParameter(default=True)
-    date = luigi.DateParameter()
-    dump_date = luigi.Parameter()
-    s3_inputs = luigi.Parameter()
-
-    def curate_data(self):
-        links = (
-            mf.Flow("GlassMainDumpFlow")
-            .latest_successful_run.data.address.rename(
-                columns={
-                    "id_organisation": "org_id",
-                    "address_rank": "rank",
-                }
-            )
-            .assign(
-                date=datetime.datetime.strptime(self.dump_date, "%m/%Y").date(),
-                # address_id=lambda x: x.index
-            )
-            # [['org_id', 'address_id', 'date', 'rank']]
-        )
-
-        return links.to_dict(orient="records")
-
-    def requires(self):
-        # tag = "dev" if self.test else "production"
-        return GlassOrganisation(
-                date=self.date,
-                dump_date=self.dump_date,
-                orm=orms.Organisation,
-                flow_path="glass_ai/ingest_data_dump.py",
-                flow_kwargs={
-                    "s3_inputs": self.s3_inputs,
-                    "test_mode": self.test,
-                    "date": self.dump_date,
-                },
-                preflow_kwargs={"datastore": "s3", "package-suffixes": ".txt"},
-            )
 
     def run(self):
-        data = self.curate_data()
+        self.s3path = self.input()[0].open("r").read()
+        data = self.curate_data(self.s3path)
         with db_session(database="dev" if self.test else "production") as session:
             # Create the table if it doesn't already exist
             engine = session.get_bind()
             Base = get_declarative_base(self.orm)
             Base.metadata.create_all(engine)
 
-            def process(row):
+            # Drop all `OrganisationAddress` for current `dump_date`
+            session.query(orms.OrganisationAddress).filter(
+                orms.OrganisationAddress.date
+                == datetime.datetime.strptime(self.dump_date, "%m/%Y").date()
+            ).delete()
 
-                # Find existing address_text's and get ID's
-                r = (
-                    session.query(orms.Address)
-                    .filter(orms.Address.address_text == row["address_text"])
-                    .one_or_none()
-                )
-                if r:  # Get address_id to build link with
-                    print("result:", r)
-                    address_id = r.address_id
-                else:  # Add new Address
-                    address = orms.Address(
-                        address_text=row["address_text"],
-                        postcode=row["postcode"],
-                        # address_id=uuid.uuid4().int,
-                    )
-                    session.add(address)
-                    session.commit()
-                    address_id = address.address_id
+            init_counter = (
+                session.query(func.max(orms.Address.address_id)).scalar() or 0
+            ) + 1
 
-                link = orms.OrganisationAddress(
-                    org_id=row["org_id"],
-                    address_id=address_id,
-                    date=row["date"],
-                    rank=row["rank"],
-                )
-                session.add(link)
-                session.commit()
+            existing_addresses: Dict[str] = {
+                collation(addr.address_text): addr
+                for addr in session.query(orms.Address).all()
+            }  # Warning: `generate_links` mutates this
 
-            # list(map(process, data))
-            def process2(row):
+            links = generate_links(data, existing_addresses, init_counter)
 
-                link = orms.OrganisationAddress(
-                    org_id=row["org_id"],
-                    date=row["date"],
-                    rank=row["rank"],
-                )
-
-                # Find any existing Address
-                address = (
-                    session.query(orms.Address)
-                    .filter(orms.Address.address_text == row["address_text"])
-                    .one_or_none()
-                ) or orms.Address(
-                    address_text=row["address_text"],
-                    postcode=row["postcode"],
-                )
-                link.address = address
-
-                session.add(link)
-
-                return
-
-            # session.add_all(map(process2, data))
-            # list(map(process2, data))
-            # session.commit()
-
-            existing_addresses = {addr.address_text: addr.address_id for addr in session.query(orms.Address).all()}  # filter(orms.Address.address_text.in_(data.address_text.values))
-            counter = session.query(func.max(orms.Address.address_id)).scalar() or 1
-            links = []
-            print(len(existing_addresses))
-            for row in data:
-                link = orms.OrganisationAddress(
-                    org_id=row["org_id"],
-                    date=row["date"],
-                    rank=row["rank"],
-                )
-
-                address_id = existing_addresses.get(row["address_text"].lower(), None)
-                if not address_id:
-                    counter += 1
-                    address = orms.Address(
-                        address_id=counter,
-                        address_text=row["address_text"],
-                        postcode=row["postcode"],
-                    )
-                    link.address = address
-                    existing_addresses[row["address_text"].lower()] = counter
-                    # print(counter)
-                    # print(row["address_text"])
-
-                links.append(link)
-            print(len(data))
-            print(len(links))
-            print(len(existing_addresses))
             session.add_all(links)
-
-            # Need to generate lookup from address_text to Address
 
         return self.output().touch()
 
-    def output(self):
-        conf = research_daps.config["mysqldb"]["mysqldb"]
-        conf["database"] = "dev" if self.test else "production"
-        conf["table"] = "BatchExample"
-        if "port" in conf:
-            conf.pop("port")
-        return MySqlTarget(update_id=self.task_id, **conf)
+
+def make_sector(df):
+    return (
+        df[["sector_name"]]
+        .drop_duplicates()
+        .sort_values("sector_name")
+        .reset_index(drop=True)  # Start from zero
+        .assign(sector_id=lambda x: x.index + 1)
+    )
 
 
-class GlassOrganisationSector(CurateTask):
-    date = luigi.DateParameter()
-    dump_date = luigi.Parameter()
-
-    def curate_data(self, _):
+class GlassSector(CurateDependentOnGlassOrganisation):
+    def curate_data(self, s3path):
+        run_id = Path(s3path).name
         return (
-            mf.Flow("GlassMainDumpFlow")
-            .latest_successful_run.data.organisation.rename(
-                columns={"id_organisation": "org_id", "organisation_name": "name"}
+            mf.Run(f"GlassMainDumpFlow/{run_id}").data.sector.pipe(make_sector)
+        ).to_dict(orient="records")
+
+
+class CurateDependentOnGlassSector(CurateDependentOnOtherCurateTask):
+    curate_task_dependency = GlassSector
+    curate_orm_dependency = orms.Sector
+
+
+class GlassOrganisationSector(CurateDependentOnGlassSector):
+    def curate_data(self, s3path):
+        run_id = Path(s3path).name
+        data = mf.Run(f"GlassMainDumpFlow/{run_id}").data
+
+        sector = data.sector.pipe(make_sector)
+
+        return (
+            data.sector.rename(
+                columns={"id_organisation": "org_id", "sector_rank": "rank"}
             )
+            .merge(sector, on="sector_name")[["org_id", "sector_id", "rank"]]
             .assign(
                 date=datetime.datetime.strptime(self.dump_date, "%m/%Y").date(),
             )
         ).to_dict(orient="records")
 
 
-class GlassSector(CurateTask):
-    date = luigi.DateParameter()
-    dump_date = luigi.Parameter()
-
-    def curate_data(self, _):
+class GlassOrganisationCompaniesHouseMatch(CurateDependentOnGlassOrganisation):
+    def curate_data(self, s3path):
+        run_id = Path(s3path).name
         return (
-            mf.Flow("GlassMainDumpFlow")
-            .latest_successful_run.data.sector[["sector_name"]]
-            .drop_duplicates()
-            .sort_values("sector_name")
-            .reset_index(drop=True)  # Start from zero
-            .assign(sector_id=lambda x: x.index + 1)
-        ).to_dict(orient="records")
-
-
-class GlassOrganisationCompaniesHouseMatch(CurateTask):
-    date = luigi.DateParameter()
-    dump_date = luigi.Parameter()
-
-    def curate_data(self, _):
-        return (
-            mf.Flow("GlassMainDumpFlow")
-            .latest_successful_run.data.organisation.rename(
-                columns={"id_organisation": "org_id", "organisation_name": "name"}
+            mf.Run(f"GlassMainDumpFlow/{run_id}")
+            .data.glass_company_match.rename(
+                columns={
+                    "id_organisation": "org_id",
+                    "company_number": "company_id",
+                    "company_number_match_type": "company_match_type",
+                }
             )
+            .dropna()
             .assign(
                 date=datetime.datetime.strptime(self.dump_date, "%m/%Y").date(),
             )
@@ -352,34 +270,35 @@ class RootTask(luigi.WrapperTask):
 
     def requires(self):
         tasks = [
-            # (GlassOrganisation, orms.Organisation),
-            # (GlassOrganisationMetadata, orms.OrganisationMetadata),
-            # (GlassOrganisationDescription, orms.OrganisationDescription),
-            (GlassSector, orms.Sector),
-            # (GlassAddress, orms.Address),
-            # (GlassOrganisationAddress, orms.OrganisationAddress),
-            # (GlassOrganisationSector, orms.OrganisationSector),
-            # (GlassOrganisationCompaniesHouseMatch, orms.OrganisationCompaniesHouseMatch),
+            (GlassOrganisationMetadata, orms.OrganisationMetadata),
+            (GlassOrganisationDescription, orms.OrganisationDescription),
+            (GlassOrganisationSector, orms.OrganisationSector),
+            # (
+            #     GlassOrganisationCompaniesHouseMatch,
+            #     orms.OrganisationCompaniesHouseMatch,
+            # ),
+            (AddressCurateTask, orms.OrganisationAddress),
         ]
 
         for Task_, Orm_ in tasks:
             yield Task_(
-                date=self.date,
-                dump_date=self.dump_date,
+                **common_args(self, test=not self.production),
                 orm=Orm_,
-                flow_path="glass_ai/ingest_data_dump.py",
-                flow_kwargs={
-                    "s3_inputs": self.s3_inputs,
-                    "test_mode": not self.production,
-                    "date": self.dump_date,
-                },
-                preflow_kwargs={"datastore": "s3", "package-suffixes": ".txt"},
             )
-        yield AddressCurateTask(
-            date=self.date,
-            dump_date=self.dump_date,
-            orm=orms.OrganisationAddress,
-            flow_path="glass_ai/ingest_data_dump.py",
-            s3_inputs=self.s3_inputs,
-            preflow_kwargs={"datastore": "s3", "package-suffixes": ".txt"},
-        )
+
+
+def common_args(self: object, test: bool) -> dict:
+    """Common args for Glass Tasks."""
+    return dict(
+        date=self.date,
+        dump_date=self.dump_date,
+        flow_path="glass_ai/ingest_data_dump.py",
+        flow_kwargs={
+            "s3_inputs": self.s3_inputs,
+            "test_mode": test,
+            "date": self.dump_date,
+        },
+        preflow_kwargs={"datastore": "s3", "package-suffixes": ".txt"},
+        test=test,
+        s3_inputs=self.s3_inputs,
+    )
