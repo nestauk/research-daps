@@ -1,6 +1,9 @@
 *~
 *#
 .metaflow/
+metaflow.s3*/
+.run_id
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
