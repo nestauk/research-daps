@@ -92,7 +92,7 @@ class CompaniesHouseMergeDumpFlow(FlowSpec):
             self.dates
         ), "Please order flows by date (earliest first)"
 
-        self.next(self.merge_sector)
+        self.next(self.merge_address)
 
     @step
     def end(self):
@@ -199,13 +199,24 @@ class CompaniesHouseMergeDumpFlow(FlowSpec):
                 )
             ),
         )
-        self.next(self.merge_address)
+        self.next(self.end)
 
     @step
     def merge_address(self):
         def process_address(address: pd.DataFrame) -> pd.DataFrame:
-            return address.assign(address_text=lambda x: x.line1 + ", " + x.line2)[
-                ["address_text", "postcode"]
+            return address.assign(
+                address_text=lambda x: (
+                    x.line1.fillna("")
+                    + " "
+                    + x.line2.fillna("")
+                    + " "
+                    + x.postcode.fillna("")
+                ).str.strip()
+                # .str.encode("ascii", "ignore")
+                # .str.decode("ascii")
+            ).loc[
+                lambda x: (x.address_text != "") | x.postcode.notnull(),
+                ["address_text", "postcode"],
             ]
 
         flows = self.get_flows(self.flow_ids)
@@ -221,7 +232,7 @@ class CompaniesHouseMergeDumpFlow(FlowSpec):
             .reset_index(drop=True)
             .assign(address_id=lambda x: x.index + 1)
         )
-        # self.next(self.end)
+
         self.next(self.merge_organisationaddress)
 
     @step
@@ -229,21 +240,26 @@ class CompaniesHouseMergeDumpFlow(FlowSpec):
         def process_organisationaddress(
             address: pd.DataFrame, date: datetime.datetime, address_lookup: pd.DataFrame
         ) -> pd.DataFrame:
+            print(date)
             return address.assign(
-                address_text=lambda x: x.line1 + ", " + x.line2, date=date
+                address_text=lambda x: (
+                    x.line1.fillna("")
+                    + " "
+                    + x.line2.fillna("")
+                    + " "
+                    + x.postcode.fillna("")
+                ).str.strip(),
+                date=date,
             ).merge(address_lookup, on="address_text")[
                 ["company_number", "address_id", "date"]
             ]
 
         flows = self.get_flows(self.flow_ids)
-        self.organisationaddress = t.thread_last(
-            flows,
-            # reversed,  # Older addresses need lower id's
-            lambda x: zip(get_flow_params("address", x), self.dates),
-            t.map(lambda x: process_organisationaddress(*x, self.address)),
-            pd.concat,
+        self.organisationaddress = pd.concat(
+            process_organisationaddress(address, date, self.address)
+            for address, date in zip(get_flow_params("address", flows), self.dates)
         )
-        self.next(self.end)
+        self.next(self.merge_sector)
 
 
 def remap_sectors(sectors: pd.DataFrame) -> pd.DataFrame:
