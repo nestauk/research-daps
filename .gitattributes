@@ -1,3 +1,4 @@
 .gitattributes !filter !diff
 research_daps/config/** filter=git-crypt diff=git-crypt
 .env filter=git-crypt diff=git-crypt
+research_daps/config/metaflowtask/** !filter !diff
